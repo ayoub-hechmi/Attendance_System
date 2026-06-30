@@ -1,5 +1,5 @@
 from datetime import datetime, date
-from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint, Table
 from sqlalchemy.orm import relationship
 from pgvector.sqlalchemy import Vector
 
@@ -16,6 +16,13 @@ class Teacher(Base):
     classes = relationship("Class", back_populates="teacher")
 
 
+class ClassStudent(Base):
+    __tablename__ = "class_students"
+    class_id = Column(Integer, ForeignKey("classes.id", ondelete="CASCADE"), primary_key=True)
+    student_id = Column(Integer, ForeignKey("students.id", ondelete="CASCADE"), primary_key=True)
+    added_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
 class Class(Base):
     __tablename__ = "classes"
     id = Column(Integer, primary_key=True)
@@ -23,7 +30,6 @@ class Class(Base):
     teacher_id = Column(Integer, ForeignKey("teachers.id"))
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     teacher = relationship("Teacher", back_populates="classes")
-    students = relationship("Student", back_populates="class_")
     windows = relationship("AttendanceWindow", back_populates="class_")
 
 
@@ -33,9 +39,8 @@ class Student(Base):
     student_number = Column(String(50), unique=True, nullable=False)
     name = Column(String(150), nullable=False)
     email = Column(String(200), unique=True)
-    class_id = Column(Integer, ForeignKey("classes.id"))
+    class_id = Column(Integer, ForeignKey("classes.id"), nullable=True)
     enrolled_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    class_ = relationship("Class", back_populates="students")
     face_vectors = relationship("FaceVector", back_populates="student", cascade="all, delete-orphan")
     attendances = relationship("Attendance", back_populates="student")
 

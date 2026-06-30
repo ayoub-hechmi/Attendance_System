@@ -1,8 +1,28 @@
-# Start all services for local development (without Docker)
-# Prerequisites: Docker running for PostgreSQL + Redis
+# Start all services for local development
 # Usage: .\start-dev.ps1
 
 $root = $PSScriptRoot
+
+# Detect host IP for QR code links.
+# Prefer the Wi-Fi adapter; fall back to the first non-virtual IPv4.
+$detectedIp = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias "Wi-Fi" -ErrorAction SilentlyContinue |
+               Select-Object -First 1).IPAddress
+
+if (-not $detectedIp) {
+    $detectedIp = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
+        $_.IPAddress -notmatch '^127\.' -and
+        $_.IPAddress -notmatch '^169\.254\.' -and
+        $_.InterfaceAlias -notmatch 'Loopback|vEthernet|Docker|WSL|Bluetooth'
+    } | Select-Object -First 1).IPAddress
+}
+
+if ($detectedIp) {
+    Write-Host "  Detected IP: $detectedIp" -ForegroundColor Gray
+    # Write to a file so the backend can read it without relying on env var inheritance
+    $detectedIp | Out-File -FilePath "$root\backend\.host_ip" -Encoding ASCII -NoNewline
+} else {
+    Write-Host "  Could not detect host IP - QR code will use localhost" -ForegroundColor Yellow
+}
 
 Write-Host "Starting PostgreSQL + Redis via Docker..." -ForegroundColor Cyan
 docker compose up db redis -d
@@ -18,6 +38,7 @@ Start-Sleep -Seconds 3
 
 Write-Host "Starting FastAPI Backend..." -ForegroundColor Cyan
 Start-Process powershell -ArgumentList "-NoExit", "-Command", "
+  `$env:HOST_IP = '$detectedIp';
   cd '$root\backend';
   .\.venv\Scripts\Activate.ps1;
   uvicorn app.main:app --port 8000 --reload
@@ -27,7 +48,7 @@ Write-Host "Starting Celery Worker..." -ForegroundColor Cyan
 Start-Process powershell -ArgumentList "-NoExit", "-Command", "
   cd '$root\backend';
   .\.venv\Scripts\Activate.ps1;
-  celery -A app.celery_app worker --loglevel=info --concurrency=4
+  celery -A app.celery_app worker --loglevel=info --pool=solo
 "
 
 Write-Host "Starting Student App (port 5173)..." -ForegroundColor Cyan
@@ -44,7 +65,9 @@ Start-Process powershell -ArgumentList "-NoExit", "-Command", "
 
 Write-Host ""
 Write-Host "All services started!" -ForegroundColor Green
-Write-Host "  Student App:       http://localhost:5173/?window=<id>" -ForegroundColor White
+Write-Host "  Student App:       https://localhost:5173" -ForegroundColor White
 Write-Host "  Teacher Dashboard: http://localhost:5174" -ForegroundColor White
 Write-Host "  Backend API docs:  http://localhost:8000/docs" -ForegroundColor White
-Write-Host "  AI Worker docs:    http://localhost:8001/docs" -ForegroundColor White
+if ($detectedIp) {
+    Write-Host "  QR codes will use: https://$($detectedIp):5173" -ForegroundColor White
+}

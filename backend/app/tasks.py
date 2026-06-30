@@ -5,27 +5,26 @@ so the FastAPI server stays non-blocking.
 import asyncio
 import logging
 
-from sqlalchemy import select, text
+import httpx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.pool import NullPool
 
 from app.celery_app import celery_app
 from app.core.config import settings
 from app.models.models import Attendance, AttendanceWindow, FaceVector, Student
 from app.services.ai_client import cosine_similarity, detect_face, embed_face
-from app.services.websocket_manager import manager
 
 logger = logging.getLogger(__name__)
 
-_engine = create_async_engine(settings.database_url)
-_Session = async_sessionmaker(_engine, expire_on_commit=False)
+
+def _make_session():
+    engine = create_async_engine(settings.database_url, poolclass=NullPool)
+    return async_sessionmaker(engine, expire_on_commit=False)
 
 
 @celery_app.task(bind=True, max_retries=2)
 def process_scan(self, image_bytes: bytes, window_id: int, student_number: str):
-    """
-    Full pipeline: YOLO detect → ArcFace embed → DB cosine search → mark attendance.
-    Runs synchronously in a Celery worker; uses asyncio.run for async DB calls.
-    """
     try:
         asyncio.run(_async_process(image_bytes, window_id, student_number))
     except Exception as exc:
@@ -34,7 +33,8 @@ def process_scan(self, image_bytes: bytes, window_id: int, student_number: str):
 
 
 async def _async_process(image_bytes: bytes, window_id: int, student_number: str):
-    async with _Session() as db:
+    Session = _make_session()
+    async with Session() as db:
         # 1. Verify window is still open
         window = await db.get(AttendanceWindow, window_id)
         if not window or not window.is_open:
@@ -99,17 +99,23 @@ async def _async_process(image_bytes: bytes, window_id: int, student_number: str
         )
         db.add(attendance)
         await db.commit()
+        await db.refresh(attendance)
 
-        # 7. Notify teacher dashboard via WebSocket
-        await manager.broadcast(
-            window.class_id,
-            {
-                "event": "student_present",
-                "student_id": student.id,
-                "student_name": student.name,
-                "student_number": student.student_number,
-                "similarity_score": round(best_score, 4),
-                "scanned_at": attendance.scanned_at.isoformat(),
-            },
-        )
         logger.info("Marked student %s present (score=%.3f)", student_number, best_score)
+
+        # 7. Notify teacher dashboard via HTTP → FastAPI → WebSocket
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                await client.post(
+                    f"{settings.backend_url}/internal/broadcast/{window.class_id}",
+                    json={
+                        "event": "student_present",
+                        "student_id": student.id,
+                        "student_name": student.name,
+                        "student_number": student.student_number,
+                        "similarity_score": round(best_score, 4),
+                        "scanned_at": attendance.scanned_at.isoformat() if attendance.scanned_at else None,
+                    },
+                )
+        except Exception as e:
+            logger.warning("WebSocket broadcast failed (non-critical): %s", e)

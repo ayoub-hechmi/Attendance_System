@@ -55,9 +55,16 @@ CREATE TABLE IF NOT EXISTS teachers (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS class_students (
+    class_id INTEGER REFERENCES classes(id) ON DELETE CASCADE,
+    student_id INTEGER REFERENCES students(id) ON DELETE CASCADE,
+    added_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (class_id, student_id)
+);
+
 -- Seed a demo class and teacher (password: "demo1234")
 INSERT INTO teachers (name, email, password_hash)
-VALUES ('Demo Teacher', 'teacher@demo.com', '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMUJqxDvb8tX0yY5Jq5vK5pX4W')
+VALUES ('Demo Teacher', 'teacher@demo.com', '$2b$12$TnIFaglGKsvD6/YSEEIRzOFdmUALP9Os3jq8E8tTSUjuBrDDSSqNi')
 ON CONFLICT DO NOTHING;
 
 INSERT INTO classes (name, teacher_id)

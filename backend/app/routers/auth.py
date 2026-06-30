@@ -1,9 +1,9 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
+import bcrypt
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,8 +13,11 @@ from app.core.database import get_db
 from app.models.models import Teacher
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
 class Token(BaseModel):
@@ -23,7 +26,7 @@ class Token(BaseModel):
 
 
 def create_access_token(data: dict) -> str:
-    expire = datetime.utcnow() + timedelta(minutes=settings.access_token_expire_minutes)
+    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_expire_minutes)
     return jwt.encode({**data, "exp": expire}, settings.secret_key, algorithm=settings.algorithm)
 
 
@@ -51,7 +54,7 @@ async def get_current_teacher(token: str = Depends(oauth2_scheme), db: AsyncSess
 async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Teacher).where(Teacher.email == form.username))
     teacher = result.scalar_one_or_none()
-    if not teacher or not pwd_context.verify(form.password, teacher.password_hash):
+    if not teacher or not verify_password(form.password, teacher.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     token = create_access_token({"sub": str(teacher.id)})
     return {"access_token": token, "token_type": "bearer"}

@@ -15,9 +15,9 @@ class ConnectionManager:
         self._connections[class_id].append(websocket)
 
     def disconnect(self, websocket: WebSocket, class_id: int):
-        self._connections[class_id].discard(websocket)
-        if websocket in self._connections[class_id]:
-            self._connections[class_id].remove(websocket)
+        conns = self._connections.get(class_id, [])
+        if websocket in conns:
+            conns.remove(websocket)
 
     async def broadcast(self, class_id: int, message: dict):
         """Send a JSON message to all teachers watching this class."""
