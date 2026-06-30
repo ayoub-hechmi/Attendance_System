@@ -362,13 +362,34 @@ export default function App() {
 
     try {
       const res  = await fetch(`${API}/attendance/scan-sync`, { method: 'POST', body: form })
+      if (res.status === 429) {
+        setMessage('Please wait a moment before trying again.')
+        setStep('error')
+        return
+      }
+      if (res.status === 503) {
+        setMessage('The face recognition service is temporarily unavailable. Please ask your teacher for assistance.')
+        setStep('error')
+        return
+      }
       const text = await res.text()
       let data
       try { data = JSON.parse(text) } catch { data = { status: 'error', message: text } }
-      setMessage(data.message || 'Unknown response')
+
+      const msg = data.message || 'Unknown response'
+      setMessage(msg)
       if (data.student_name) setCheckedInName(data.student_name)
       setNotRecognised(data.status === 'not_recognised')
-      setStep(data.status === 'present' ? 'done' : 'error')
+
+      if (data.status === 'present') {
+        setStep('done')
+      } else if (data.status === 'already_present') {
+        // Show success if they're already marked present
+        if (data.student_name) setCheckedInName(data.student_name)
+        setStep('done')
+      } else {
+        setStep('error')
+      }
     } catch (err) {
       setMessage(`Network error: ${err.message}`)
       setStep('error')
@@ -404,6 +425,20 @@ export default function App() {
           </div>
         )}
 
+        {/* ── SESSION CLOSED (expired while in-flow) ── */}
+        {expired && step !== 'done' && step !== 'enter' && (
+          <div className="bg-red-950 border border-red-700 rounded-2xl p-8 text-center space-y-3">
+            <p className="text-red-300 font-semibold text-lg">Session Closed</p>
+            <p className="text-gray-400 text-sm">The attendance window has ended. Contact your teacher if you need to be marked present.</p>
+            <button
+              onClick={() => { stopCamera(); setStep('enter') }}
+              className="bg-gray-700 hover:bg-gray-600 rounded-xl px-6 py-2.5 text-sm font-medium transition-colors"
+            >
+              Back to Start
+            </button>
+          </div>
+        )}
+
         {/* ── ENTER ── */}
         {step === 'enter' && (
           <div className="bg-gray-800 border border-gray-700 rounded-2xl p-6 space-y-3">
@@ -420,7 +455,10 @@ export default function App() {
             )}
 
             {expired ? (
-              <p className="text-red-400 text-sm text-center py-2">This attendance session has already closed.</p>
+              <div className="text-center py-2 space-y-2">
+                <p className="text-red-400 text-sm font-medium">This attendance session has closed.</p>
+                <p className="text-gray-500 text-xs">Contact your teacher if you need to be marked present.</p>
+              </div>
             ) : windowId ? (
               <>
                 <p className="text-gray-400 text-sm text-center pb-1">How would you like to check in?</p>
@@ -535,7 +573,9 @@ export default function App() {
                 Welcome,<br />{checkedInName}!
               </p>
             )}
-            <p className="text-green-400 font-semibold text-lg">Attendance Recorded</p>
+            <p className="text-green-400 font-semibold text-lg">
+              {message.includes('already') ? 'Already Checked In' : 'Attendance Recorded'}
+            </p>
             <p className="text-gray-500 text-sm pt-2">You can close this tab.</p>
           </div>
         )}
@@ -579,18 +619,23 @@ export default function App() {
             <input
               className="w-full bg-gray-700 rounded-lg px-4 py-3 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
               placeholder="Full Name"
+              maxLength={100}
               value={enrollName}
-              onChange={e => setEnrollName(e.target.value)}
+              onChange={e => setEnrollName(e.target.value.replace(/[<>]/g, ''))}
             />
             <input
               className="w-full bg-gray-700 rounded-lg px-4 py-3 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              placeholder="Student ID"
+              placeholder="Student ID (letters, digits, - or _)"
+              maxLength={50}
               value={enrollNumber}
-              onChange={e => setEnrollNumber(e.target.value)}
+              onChange={e => setEnrollNumber(e.target.value.replace(/[^A-Za-z0-9\-_]/g, ''))}
             />
+            {enrollNumber && !/^[A-Za-z0-9\-_]{2,}$/.test(enrollNumber) && (
+              <p className="text-yellow-400 text-xs -mt-2">Student ID must be at least 2 characters: letters, digits, - or _</p>
+            )}
             <button
               onClick={startEnrollCamera}
-              disabled={!enrollName.trim() || !enrollNumber.trim()}
+              disabled={enrollName.trim().length < 2 || !/^[A-Za-z0-9\-_]{2,}$/.test(enrollNumber)}
               className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl py-3 font-semibold transition-colors"
             >
               Continue to Camera

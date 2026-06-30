@@ -17,7 +17,7 @@ Automated classroom attendance powered by deep learning. Teachers open a timed s
 | Layer | Technology | Port |
 |-------|-----------|------|
 | Student App | React + Vite (HTTPS) | 5173 |
-| Teacher Dashboard | React + Vite (HTTP) | 5174 |
+| Teacher Dashboard | React + Vite (HTTPS) | 5174 |
 | Backend API | FastAPI + SQLAlchemy async | 8000 |
 | AI Worker | DeepFace 0.0.93 (Docker) | 8001 |
 | Database | PostgreSQL + pgvector | 5432 |
@@ -95,7 +95,7 @@ Schema is in `db/init.sql`. Run it once against your PostgreSQL instance:
 psql -U postgres -f db/init.sql
 ```
 
-Default demo teacher account: `teacher@demo.com` / `demo1234`
+No seed accounts are included. Create your first teacher account via the "Create an account" link on the teacher dashboard login page (or `POST /api/v1/auth/register`).
 
 ## Project Structure
 

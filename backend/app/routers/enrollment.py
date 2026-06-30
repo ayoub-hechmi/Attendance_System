@@ -173,6 +173,7 @@ async def list_students(
     )).scalar() or 0
 
     attendance_counts = {}
+    latest_enrollment = {}
     for s in students:
         count = (await db.execute(
             select(func.count(Attendance.id))
@@ -184,6 +185,11 @@ async def list_students(
         )).scalar() or 0
         attendance_counts[s.id] = count
 
+        latest = (await db.execute(
+            select(func.max(FaceVector.created_at)).where(FaceVector.student_id == s.id)
+        )).scalar()
+        latest_enrollment[s.id] = latest
+
     return [
         {
             "id": s.id,
@@ -194,6 +200,7 @@ async def list_students(
             "face_count": face_counts.get(s.id, 0),
             "sessions_attended": attendance_counts.get(s.id, 0),
             "sessions_total": total_sessions,
+            "last_enrolled_at": latest_enrollment[s.id].isoformat() if latest_enrollment.get(s.id) else None,
         }
         for s in students
     ]

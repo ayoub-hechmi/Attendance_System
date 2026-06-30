@@ -145,6 +145,78 @@ async def detect_face_fast(image: UploadFile = File(...)):
     return {"face_found": True, "bbox": bbox}
 
 
+@app.post("/detect-scan")
+async def detect_face_for_scan(image: UploadFile = File(...)):
+    """
+    RetinaFace detection with multi-face guard and anti-spoofing.
+    Used only for the final /scan-sync call — not the live identify loop.
+    Returns face_count so the backend can reject multi-face frames.
+    Anti-spoofing is best-effort: if the model download fails, is_real is null.
+    """
+    raw = await image.read()
+    try:
+        img = decode_image(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid image data")
+
+    h, w = img.shape[:2]
+
+    try:
+        face_objs = DeepFace.extract_faces(
+            img_path=img,
+            detector_backend="retinaface",
+            enforce_detection=False,
+            align=False,
+        )
+    except Exception as e:
+        logger.warning("RetinaFace scan detection failed: %s", e)
+        return JSONResponse({"face_found": False, "bbox": None, "face_count": 0,
+                             "is_real": None, "multi_face": False})
+
+    valid = [f for f in face_objs
+             if f["facial_area"]["w"] > 20
+             and f["facial_area"]["h"] > 20
+             and f.get("confidence", 1.0) >= 0.90]
+
+    face_count = len(valid)
+
+    if face_count == 0:
+        return JSONResponse({"face_found": False, "bbox": None, "face_count": 0,
+                             "is_real": None, "multi_face": False})
+
+    if face_count > 1:
+        return JSONResponse({"face_found": True, "bbox": None, "face_count": face_count,
+                             "is_real": None, "multi_face": True})
+
+    bbox = _extract_bbox(valid, w, h)
+
+    # Anti-spoofing — best effort; fall back gracefully if model is unavailable
+    is_real = None
+    antispoof_score = None
+    try:
+        spoof_objs = DeepFace.extract_faces(
+            img_path=img,
+            detector_backend="retinaface",
+            enforce_detection=False,
+            align=False,
+            anti_spoofing=True,
+        )
+        if spoof_objs:
+            is_real = spoof_objs[0].get("is_real", None)
+            antispoof_score = spoof_objs[0].get("antispoof_score", None)
+    except Exception as e:
+        logger.warning("Anti-spoofing check skipped (model unavailable): %s", e)
+
+    return {
+        "face_found": True,
+        "bbox": bbox,
+        "face_count": 1,
+        "is_real": is_real,
+        "antispoof_score": antispoof_score,
+        "multi_face": False,
+    }
+
+
 @app.post("/embed")
 async def embed_face(image: UploadFile = File(...)):
     """512-D ArcFace embedding for a pre-cropped face image."""

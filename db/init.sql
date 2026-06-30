@@ -28,6 +28,10 @@ CREATE INDEX IF NOT EXISTS face_vectors_embedding_idx
     ON face_vectors USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
 
+-- B-tree index for efficient lookup by student_id
+CREATE INDEX IF NOT EXISTS idx_face_vectors_student_id
+    ON face_vectors(student_id);
+
 CREATE TABLE IF NOT EXISTS attendance_windows (
     id SERIAL PRIMARY KEY,
     class_id INTEGER REFERENCES classes(id),
@@ -62,11 +66,4 @@ CREATE TABLE IF NOT EXISTS class_students (
     PRIMARY KEY (class_id, student_id)
 );
 
--- Seed a demo class and teacher (password: "demo1234")
-INSERT INTO teachers (name, email, password_hash)
-VALUES ('Demo Teacher', 'teacher@demo.com', '$2b$12$TnIFaglGKsvD6/YSEEIRzOFdmUALP9Os3jq8E8tTSUjuBrDDSSqNi')
-ON CONFLICT DO NOTHING;
-
-INSERT INTO classes (name, teacher_id)
-VALUES ('CS101 - Introduction to Computer Science', 1)
-ON CONFLICT DO NOTHING;
+-- No seed data — create your first teacher account via POST /api/v1/auth/register

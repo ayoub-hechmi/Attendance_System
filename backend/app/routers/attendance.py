@@ -1,24 +1,48 @@
 import io
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import List
 
 import httpx
 from PIL import Image, ImageEnhance
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.limiter import limiter
 from app.models.models import Attendance, AttendanceWindow, Class, ClassStudent, FaceVector, Student
 from app.routers.auth import get_current_teacher
-from app.services.ai_client import cosine_similarity, detect_face, detect_face_fast, embed_face
+from app.services.ai_client import check_worker_health, cosine_similarity, detect_face, detect_face_fast, detect_face_for_scan, embed_face
 from app.services.websocket_manager import manager
 from app.tasks import process_scan
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/attendance", tags=["attendance"])
+
+_NAME_RE = re.compile(r'^[\w\s\-\'\.À-ɏЀ-ӿ؀-ۿ]{2,100}$', re.UNICODE)
+_NUM_RE  = re.compile(r'^[A-Za-z0-9\-_]{2,50}$')
+
+
+def _validate_name(name: str) -> str:
+    name = name.strip()
+    if not name or len(name) > 100:
+        raise HTTPException(status_code=422, detail="Name must be between 2 and 100 characters.")
+    if re.search(r'[<>]', name):
+        raise HTTPException(status_code=422, detail="Name contains invalid characters.")
+    return name
+
+
+def _validate_student_number(num: str) -> str:
+    num = num.strip()
+    if not _NUM_RE.match(num):
+        raise HTTPException(
+            status_code=422,
+            detail="Student number must be 2–50 characters and contain only letters, digits, hyphens, or underscores.",
+        )
+    return num
 
 
 async def _students_in_class(class_id: int, db: AsyncSession):
@@ -112,7 +136,9 @@ async def identify_face(
 
 
 @router.post("/scan-sync")
+@limiter.limit("1/5 seconds")
 async def scan_face_sync(
+    request: Request,
     image: UploadFile = File(...),
     window_id: int = Form(...),
     db: AsyncSession = Depends(get_db),
@@ -122,7 +148,27 @@ async def scan_face_sync(
         return {"status": "error", "message": "Attendance session is not open or has expired."}
 
     image_bytes = await image.read()
-    bbox = await detect_face(image_bytes)
+
+    # Full detection: multi-face guard + anti-spoofing
+    detection = await detect_face_for_scan(image_bytes)
+
+    if not detection.get("face_found"):
+        return {"status": "no_face", "message": "No face detected. Look directly at the camera and try again."}
+
+    if detection.get("multi_face"):
+        face_count = detection.get("face_count", "multiple")
+        return {
+            "status": "multi_face",
+            "message": f"{face_count} faces detected. Only one person should be in view.",
+        }
+
+    if detection.get("is_real") is False:
+        return {
+            "status": "spoof_detected",
+            "message": "Liveness check failed. Use your real face — photos or screens are not accepted.",
+        }
+
+    bbox = detection.get("bbox")
     if not bbox:
         return {"status": "no_face", "message": "No face detected. Look directly at the camera and try again."}
 
@@ -136,7 +182,7 @@ async def scan_face_sync(
         select(Attendance).where(Attendance.student_id == student.id, Attendance.window_id == window_id)
     )).scalar_one_or_none()
     if existing:
-        return {"status": "already_present", "message": f"{student.name} is already marked present for this session."}
+        return {"status": "already_present", "student_name": student.name, "message": f"{student.name} is already marked present for this session."}
 
     attendance = Attendance(student_id=student.id, window_id=window_id, status="present", similarity_score=score)
     db.add(attendance)
@@ -319,13 +365,16 @@ async def self_enroll(
     db: AsyncSession = Depends(get_db),
 ):
     """Student self-enrollment via QR link: create account, store face, mark present."""
+    name           = _validate_name(name)
+    student_number = _validate_student_number(student_number)
+
     window = await db.get(AttendanceWindow, window_id)
     if not window or not window.is_open or datetime.now(timezone.utc) > window.closes_at:
         raise HTTPException(status_code=400, detail="This attendance session is not open.")
 
     # Re-use an existing student if the student number already exists globally
     student = (await db.execute(
-        select(Student).where(Student.student_number == student_number.strip())
+        select(Student).where(Student.student_number == student_number)
     )).scalar_one_or_none()
 
     if student:
@@ -339,7 +388,7 @@ async def self_enroll(
         if not already_in:
             db.add(ClassStudent(class_id=window.class_id, student_id=student.id))
     else:
-        student = Student(name=name.strip(), student_number=student_number.strip())
+        student = Student(name=name, student_number=student_number)
         db.add(student)
         await db.flush()
         db.add(ClassStudent(class_id=window.class_id, student_id=student.id))
@@ -384,6 +433,54 @@ async def self_enroll(
     await db.commit()
     await _notify_teacher(window.class_id, student, 1.0)
     return {"status": "present", "student_name": student.name}
+
+
+@router.post("/window/{window_id}/reopen")
+async def reopen_window(
+    window_id: int,
+    extra_minutes: int = 5,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_current_teacher),
+):
+    """Re-open a closed attendance window, extending it by extra_minutes from now."""
+    window = await db.get(AttendanceWindow, window_id)
+    if not window:
+        raise HTTPException(status_code=404, detail="Window not found")
+    cls = await db.get(Class, window.class_id)
+    if not cls or cls.teacher_id != teacher.id:
+        raise HTTPException(status_code=403, detail="Not your class")
+    extra = max(1, min(120, extra_minutes))
+    window.is_open  = True
+    window.closes_at = datetime.now(timezone.utc) + timedelta(minutes=extra)
+    await db.commit()
+    await manager.broadcast(window.class_id, {
+        "event": "window_reopened",
+        "window_id": window.id,
+        "closes_at": window.closes_at.isoformat(),
+    })
+    return {"window_id": window.id, "closes_at": window.closes_at.isoformat()}
+
+
+@router.get("/queue-depth")
+async def queue_depth(teacher=Depends(get_current_teacher)):
+    """Returns the Celery task queue depth so the dashboard can show a warning if it backs up."""
+    try:
+        import redis as redis_sync
+        r = redis_sync.Redis.from_url(settings.redis_url, socket_connect_timeout=1)
+        depth = int(r.llen("celery"))
+        r.close()
+        return {"depth": depth, "status": "ok"}
+    except Exception:
+        return {"depth": -1, "status": "error"}
+
+
+@router.get("/worker-health")
+async def worker_health():
+    """Checks whether the AI worker is reachable. Used by the student app on load."""
+    alive = await check_worker_health()
+    if not alive:
+        return {"status": "unavailable"}
+    return {"status": "ok"}
 
 
 @router.websocket("/ws/{class_id}")
