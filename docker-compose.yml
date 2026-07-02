@@ -48,7 +48,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       AI_WORKER_URL: http://ai-worker:8001
       SECRET_KEY: ${SECRET_KEY}
-      FACE_SIMILARITY_THRESHOLD: "0.60"
+      FACE_SIMILARITY_THRESHOLD: "0.40"
       ATTENDANCE_WINDOW_MINUTES: "3"
     depends_on:
       db:
@@ -69,7 +69,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       AI_WORKER_URL: http://ai-worker:8001
       SECRET_KEY: ${SECRET_KEY}
-      FACE_SIMILARITY_THRESHOLD: "0.60"
+      FACE_SIMILARITY_THRESHOLD: "0.40"
       ATTENDANCE_WINDOW_MINUTES: "3"
     depends_on:
       db:

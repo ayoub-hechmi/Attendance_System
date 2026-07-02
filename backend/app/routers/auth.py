@@ -80,7 +80,7 @@ async def register(body: TeacherRegister, db: AsyncSession = Depends(get_db)):
 
 @router.post("/token", response_model=Token)
 async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Teacher).where(Teacher.email == form.username))
+    result = await db.execute(select(Teacher).where(Teacher.email == form.username.strip().lower()))
     teacher = result.scalar_one_or_none()
     if not teacher or not verify_password(form.password, teacher.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
