@@ -12,6 +12,7 @@ const POSES = [
   { label: 'Tilt your head slightly UP',    sub: 'Look a little toward the ceiling' },
   { label: 'Tilt your head slightly DOWN',  sub: 'Look a little toward the floor' },
 ]
+const BONUS_FRAMES = 5
 
 // ── FaceCaptureModal ──────────────────────────────────────────────────────────
 function FaceCaptureModal({ onDone, onClose }) {
@@ -22,6 +23,7 @@ function FaceCaptureModal({ onDone, onClose }) {
   const [countdown, setCountdown] = useState(3)
   const [captured, setCaptured]   = useState(0)
   const [flash, setFlash]         = useState(false)
+  const [bonus, setBonus]         = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -72,6 +74,29 @@ function FaceCaptureModal({ onDone, onClose }) {
         setCaptured(blobs.length)
         await sleep(500)
       }
+
+      // Bonus frames — silent captures after the guided poses
+      if (!cancelled && blobs.length > 0) {
+        setBonus(true)
+        for (let b = 0; b < BONUS_FRAMES; b++) {
+          if (cancelled) return
+          const video  = videoRef.current
+          const canvas = canvasRef.current
+          if (video && canvas) {
+            canvas.width  = video.videoWidth  || 640
+            canvas.height = video.videoHeight || 480
+            canvas.getContext('2d').drawImage(video, 0, 0)
+            setFlash(true)
+            setTimeout(() => setFlash(false), 120)
+            const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92))
+            blobs.push(blob)
+            setCaptured(blobs.length)
+          }
+          await sleep(400)
+        }
+        setBonus(false)
+      }
+
       if (!cancelled) { setPhase('done'); onDone(blobs) }
     })()
     return () => { cancelled = true }
@@ -114,17 +139,28 @@ function FaceCaptureModal({ onDone, onClose }) {
           {phase === 'capturing' && (
             <>
               <div className="text-center">
-                <p className="text-white font-semibold text-base">{POSES[step].label}</p>
-                <p className="text-gray-400 text-sm mt-0.5">{POSES[step].sub}</p>
+                {bonus ? (
+                  <>
+                    <p className="text-white font-semibold text-base">Hold still for a moment</p>
+                    <p className="text-gray-400 text-sm mt-0.5">Getting a few extra angles…</p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-white font-semibold text-base">{POSES[step].label}</p>
+                    <p className="text-gray-400 text-sm mt-0.5">{POSES[step].sub}</p>
+                  </>
+                )}
               </div>
               <div className="flex justify-center gap-3">
                 {POSES.map((_, i) => (
                   <div key={i} className={`w-3 h-3 rounded-full transition-all duration-300 ${
-                    i < captured ? 'bg-green-400 scale-110' : i === step ? 'bg-white animate-pulse' : 'bg-gray-600'
+                    i < Math.min(captured, POSES.length) ? 'bg-green-400 scale-110'
+                      : i === step && !bonus ? 'bg-white animate-pulse'
+                      : 'bg-gray-600'
                   }`} />
                 ))}
               </div>
-              <p className="text-gray-500 text-xs text-center">{captured} / {POSES.length} photos captured</p>
+              <p className="text-gray-500 text-xs text-center">{captured} / {POSES.length + BONUS_FRAMES} photos captured</p>
             </>
           )}
           {phase === 'done' && <p className="text-green-400 text-sm text-center font-medium">Uploading to the system…</p>}
@@ -157,6 +193,17 @@ export default function App() {
   const [password, setPassword] = useState('')
   const [loginError, setLoginError] = useState('')
   const [tab, setTab] = useState('session')
+
+  // Registration
+  const [isRegistering, setIsRegistering] = useState(false)
+  const [regName, setRegName]             = useState('')
+  const [regEmail, setRegEmail]           = useState('')
+  const [regPassword, setRegPassword]     = useState('')
+  const [regError, setRegError]           = useState('')
+  const [regLoading, setRegLoading]       = useState(false)
+
+  // Queue depth (system health)
+  const [queueDepth, setQueueDepth]       = useState(null)
 
   // Server IP for share links (fetched once — localhost is wrong for student devices)
   const [serverIp, setServerIp] = useState(window.location.hostname)
@@ -251,6 +298,57 @@ export default function App() {
     setClasses([])
   }
 
+  async function register() {
+    setRegError('')
+    if (!regName.trim() || !regEmail.trim() || !regPassword) {
+      setRegError('All fields are required.')
+      return
+    }
+    if (regPassword.length < 8) {
+      setRegError('Password must be at least 8 characters.')
+      return
+    }
+    setRegLoading(true)
+    const res = await fetch(`${API}/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: regName.trim(), email: regEmail.trim(), password: regPassword }),
+    })
+    const data = await res.json()
+    setRegLoading(false)
+    if (res.ok) {
+      // Auto-login after registration
+      const form = new FormData()
+      form.append('username', regEmail.trim())
+      form.append('password', regPassword)
+      const loginRes = await fetch(`${API}/auth/token`, { method: 'POST', body: form })
+      const loginData = await loginRes.json()
+      if (loginRes.ok) {
+        localStorage.setItem('token', loginData.access_token)
+        setToken(loginData.access_token)
+      } else {
+        setIsRegistering(false)
+        setEmail(regEmail.trim())
+      }
+    } else {
+      setRegError(data.detail || 'Registration failed.')
+    }
+  }
+
+  // ── Queue depth poll ───────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!token) return
+    const poll = async () => {
+      try {
+        const res = await fetch(`${API}/attendance/queue-depth`, { headers: auth })
+        if (res.ok) { const d = await res.json(); setQueueDepth(d.depth) }
+      } catch {}
+    }
+    poll()
+    const id = setInterval(poll, 30_000)
+    return () => clearInterval(id)
+  }, [token]) // eslint-disable-line
+
   // ── Classes ────────────────────────────────────────────────────────────────
   async function fetchClasses() {
     const res = await fetch(`${API}/enrollment/classes`, { headers: auth })
@@ -338,6 +436,26 @@ export default function App() {
     return () => clearInterval(id)
   }, [closesAt])
 
+  // ── Restore active window on load/class-switch ────────────────────────────
+  async function restoreActiveWindow(classId) {
+    try {
+      const res = await fetch(`${API}/attendance/history?class_id=${classId}`, { headers: auth })
+      if (!res.ok) return
+      const sessions = await res.json()
+      const active = sessions.find(s => s.is_open && new Date(s.closes_at) > new Date())
+      if (active) {
+        setWindowId(active.id)
+        setClosesAt(new Date(active.closes_at))
+        await fetchRoster(active.id)
+      }
+    } catch {}
+  }
+
+  useEffect(() => {
+    if (!token || !selectedClass) return
+    restoreActiveWindow(selectedClass.id)
+  }, [token, selectedClass]) // eslint-disable-line
+
   // ── Session actions ────────────────────────────────────────────────────────
   async function openWindow() {
     if (!selectedClass) return
@@ -360,6 +478,20 @@ export default function App() {
     await fetch(`${API}/attendance/window/${windowId}/close`, { method: 'POST', headers: auth })
     setWindowId(null)
     setRoster([])
+  }
+
+  async function reopenWindow(wid, extraMinutes = 5) {
+    const res = await fetch(
+      `${API}/attendance/window/${wid}/reopen?extra_minutes=${extraMinutes}`,
+      { method: 'POST', headers: auth }
+    )
+    if (res.ok) {
+      const data = await res.json()
+      setWindowId(data.window_id)
+      setClosesAt(new Date(data.closes_at))
+      await fetchRoster(data.window_id)
+      setTab('session')
+    }
   }
 
   async function fetchRoster(wid) {
@@ -610,32 +742,80 @@ export default function App() {
   const secs = String(timeLeft % 60).padStart(2, '0')
   const shareLink = `https://${serverIp}:5173/?window=${windowId}`
 
-  // ── Login ──────────────────────────────────────────────────────────────────
+  // ── Login / Register ───────────────────────────────────────────────────────
   if (!token) return (
     <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
       <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8 w-full max-w-sm space-y-4 shadow-2xl">
         <div className="text-center mb-2">
           <div className="text-3xl mb-1">🎓</div>
           <h1 className="text-xl font-bold text-white">Teacher Portal</h1>
-          <p className="text-gray-400 text-sm mt-1">Sign in to manage attendance</p>
+          <p className="text-gray-400 text-sm mt-1">
+            {isRegistering ? 'Create a teacher account' : 'Sign in to manage attendance'}
+          </p>
         </div>
-        {loginError && (
-          <div className="bg-red-900/40 border border-red-700 rounded-lg px-4 py-2 text-red-300 text-sm">{loginError}</div>
+
+        {isRegistering ? (
+          <>
+            {regError && (
+              <div className="bg-red-900/40 border border-red-700 rounded-lg px-4 py-2 text-red-300 text-sm">{regError}</div>
+            )}
+            <input
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="Full Name" value={regName} onChange={e => setRegName(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && register()}
+            />
+            <input
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="Email" value={regEmail} onChange={e => setRegEmail(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && register()}
+            />
+            <input
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              type="password" placeholder="Password (min 8 chars)" value={regPassword}
+              onChange={e => setRegPassword(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && register()}
+            />
+            <button
+              onClick={register}
+              disabled={regLoading}
+              className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg py-3 font-semibold text-white transition"
+            >
+              {regLoading ? 'Creating account…' : 'Create Account'}
+            </button>
+            <button
+              onClick={() => { setIsRegistering(false); setRegError('') }}
+              className="w-full text-gray-500 hover:text-gray-300 text-sm text-center transition py-1"
+            >
+              Back to Sign In
+            </button>
+          </>
+        ) : (
+          <>
+            {loginError && (
+              <div className="bg-red-900/40 border border-red-700 rounded-lg px-4 py-2 text-red-300 text-sm">{loginError}</div>
+            )}
+            <input
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="Email" value={email} onChange={e => setEmail(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && login()}
+            />
+            <input
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              type="password" placeholder="Password" value={password}
+              onChange={e => setPassword(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && login()}
+            />
+            <button onClick={login} className="w-full bg-indigo-600 hover:bg-indigo-500 rounded-lg py-3 font-semibold text-white transition">
+              Sign In
+            </button>
+            <button
+              onClick={() => { setIsRegistering(true); setLoginError('') }}
+              className="w-full text-gray-500 hover:text-gray-300 text-sm text-center transition py-1"
+            >
+              Create an account
+            </button>
+          </>
         )}
-        <input
-          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          placeholder="Email" value={email} onChange={e => setEmail(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && login()}
-        />
-        <input
-          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          type="password" placeholder="Password" value={password}
-          onChange={e => setPassword(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && login()}
-        />
-        <button onClick={login} className="w-full bg-indigo-600 hover:bg-indigo-500 rounded-lg py-3 font-semibold text-white transition">
-          Sign In
-        </button>
       </div>
     </div>
   )
@@ -656,6 +836,11 @@ export default function App() {
       {/* Top bar */}
       <div className="bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center gap-3">
         <h1 className="font-bold text-indigo-400 text-lg mr-auto">Attendance Dashboard</h1>
+        {queueDepth > 5 && (
+          <span className="text-xs bg-yellow-900/60 border border-yellow-700 text-yellow-300 rounded-lg px-2 py-1">
+            Queue backed up ({queueDepth} tasks)
+          </span>
+        )}
 
         {/* Class selector */}
         {classes.length > 0 && (
@@ -1221,6 +1406,15 @@ export default function App() {
                                 }`}>
                                   {s.face_enrolled ? `✓ Face (${s.face_count})` : '⚠ No face'}
                                 </span>
+                                {s.last_enrolled_at && s.face_enrolled && (() => {
+                                  const daysOld = Math.floor((Date.now() - new Date(s.last_enrolled_at)) / 86400000)
+                                  return daysOld > 180 ? (
+                                    <span className="text-xs px-2 py-1 rounded-full bg-orange-900/40 text-orange-400 border border-orange-800/50"
+                                          title={`Face data last updated ${daysOld} days ago — consider re-enrolling`}>
+                                      ↻ Re-enroll?
+                                    </span>
+                                  ) : null
+                                })()}
                                 <button onClick={() => setEditingStudent({ id: s.id, name: s.name, student_number: s.student_number })}
                                   title="Edit student" className="text-gray-500 hover:text-indigo-400 transition text-sm">
                                   ✏
@@ -1290,12 +1484,35 @@ export default function App() {
                               </div>
                             </div>
                           </div>
-                          <button
-                            onClick={() => downloadHistorySession(h.id, h.date, timeStr, selectedClass?.name)}
-                            className="bg-gray-700 hover:bg-gray-600 rounded-xl px-4 py-2 text-sm font-medium transition flex-shrink-0"
-                          >
-                            ⬇ Excel
-                          </button>
+                          <div className="flex gap-2 flex-shrink-0">
+                            {h.is_open && new Date(h.closes_at) > new Date() ? (
+                              <button
+                                onClick={async () => {
+                                  setWindowId(h.id)
+                                  setClosesAt(new Date(h.closes_at))
+                                  await fetchRoster(h.id)
+                                  setTab('session')
+                                }}
+                                className="bg-green-800 hover:bg-green-700 rounded-xl px-4 py-2 text-sm font-medium transition"
+                              >
+                                → View Live
+                              </button>
+                            ) : !h.is_open ? (
+                              <button
+                                onClick={() => reopenWindow(h.id, 5)}
+                                className="bg-indigo-800 hover:bg-indigo-700 rounded-xl px-4 py-2 text-sm font-medium transition"
+                                title="Re-open for 5 more minutes"
+                              >
+                                ↺ Re-open
+                              </button>
+                            ) : null}
+                            <button
+                              onClick={() => downloadHistorySession(h.id, h.date, timeStr, selectedClass?.name)}
+                              className="bg-gray-700 hover:bg-gray-600 rounded-xl px-4 py-2 text-sm font-medium transition"
+                            >
+                              ⬇ Excel
+                            </button>
+                          </div>
                         </div>
                       )
                     })}

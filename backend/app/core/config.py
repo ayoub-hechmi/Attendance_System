@@ -10,7 +10,9 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 8
     face_similarity_threshold: float = 0.80
+    face_match_margin: float = 0.08
     attendance_window_minutes: int = 3
+    vectors_backup_dir: str = ""
 
     class Config:
         env_file = ".env"

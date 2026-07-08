@@ -14,3 +14,5 @@ pydantic-settings==2.14.2
 numpy==1.26.4
 Pillow==10.4.0
 websockets==13.1
+slowapi==0.1.9
+limits==3.13.0

@@ -10,6 +10,7 @@ const ENROLL_POSES = [
   { label: 'Tilt slightly UP',             sub: 'Look a little toward the ceiling' },
   { label: 'Tilt slightly DOWN',           sub: 'Look a little toward the floor' },
 ]
+const ENROLL_BONUS = 5   // extra frames captured after the guided poses
 
 export default function App() {
   const videoRef    = useRef(null)
@@ -21,6 +22,7 @@ export default function App() {
   const fastBboxRef   = useRef(null)
   const identifiedRef = useRef(null)
   const lerpBboxRef   = useRef(null)
+  const detectingRef  = useRef(false)
   const enrollVideoRef   = useRef(null)
   const enrollStreamRef  = useRef(null)
 
@@ -41,6 +43,8 @@ export default function App() {
   const [enrollPoseStep,  setEnrollPoseStep]  = useState(0)
   const [enrollCountdown, setEnrollCountdown] = useState(3)
   const [enrollFlash,     setEnrollFlash]     = useState(false)
+  const [enrollBonus,     setEnrollBonus]     = useState(false)
+  const [scanStage,       setScanStage]       = useState(0)
 
   // ── Read window ID from URL ────────────────────────────────────────────────
   useEffect(() => {
@@ -108,6 +112,28 @@ export default function App() {
         }
         await sleep(600)
       }
+
+      // Bonus frames — silent, no countdown, student holds natural position
+      if (!cancelled && blobs.length > 0) {
+        setEnrollBonus(true)
+        for (let b = 0; b < ENROLL_BONUS; b++) {
+          if (cancelled) return
+          const video = enrollVideoRef.current
+          if (video && video.videoWidth > 0) {
+            const canvas = document.createElement('canvas')
+            canvas.width  = video.videoWidth
+            canvas.height = video.videoHeight
+            canvas.getContext('2d').drawImage(video, 0, 0)
+            setEnrollFlash(true)
+            setTimeout(() => setEnrollFlash(false), 120)
+            const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92))
+            if (blob) { blobs.push(blob); setEnrollPhotos([...blobs]) }
+          }
+          await sleep(400)
+        }
+        setEnrollBonus(false)
+      }
+
       if (!cancelled && blobs.length > 0) {
         stopEnrollCamera()
         setStep('enrolling')
@@ -149,6 +175,13 @@ export default function App() {
     return () => timers.forEach(clearTimeout)
   }, [identified, step]) // eslint-disable-line
 
+  // ── Scanning stage animation ───────────────────────────────────────────────
+  useEffect(() => {
+    if (step !== 'scanning') { setScanStage(0); return }
+    const t = setTimeout(() => setScanStage(1), 800)
+    return () => clearTimeout(t)
+  }, [step])
+
   // ── RAF render loop ────────────────────────────────────────────────────────
   useEffect(() => {
     if (step !== 'camera') return
@@ -185,7 +218,7 @@ export default function App() {
         } else if (!lerpBboxRef.current) {
           lerpBboxRef.current = [...target]
         } else {
-          const t = 0.18
+          const t = 0.28
           lerpBboxRef.current = target.map((v, i) => lerpBboxRef.current[i] + (v - lerpBboxRef.current[i]) * t)
         }
 
@@ -196,29 +229,52 @@ export default function App() {
           const x2 = vw - rx1
           const y1 = ry1
           const y2 = ry2
-          const idf = identifiedRef.current
-          const found = idf?.found
-          const color = found ? '#22c55e' : '#ef4444'
+          const idf      = identifiedRef.current
+          const found    = idf?.found === true
+          const scanning = !idf || detectingRef.current
+
+          const now   = Date.now()
+          const pulse = (Math.sin(now / 300) + 1) / 2
+
+          const color = found
+            ? '#22c55e'
+            : scanning
+            ? `rgba(56,189,248,${(0.6 + pulse * 0.4).toFixed(2)})`
+            : '#ef4444'
+
           const lw = Math.max(2, vw / 250)
 
-          ctx.strokeStyle = color
-          ctx.lineWidth = lw
-          ctx.strokeRect(x1, y1, x2 - x1, y2 - y1)
+          // Sweep line while waiting for identify result
+          if (scanning) {
+            const scanT = (now % 1400) / 1400
+            const scanY = y1 + (y2 - y1) * scanT
+            const grad  = ctx.createLinearGradient(x1, 0, x2, 0)
+            grad.addColorStop(0,   'rgba(56,189,248,0)')
+            grad.addColorStop(0.5, `rgba(56,189,248,${(0.75 - scanT * 0.4).toFixed(2)})`)
+            grad.addColorStop(1,   'rgba(56,189,248,0)')
+            ctx.strokeStyle = grad
+            ctx.lineWidth   = Math.max(1.5, vw / 350)
+            ctx.beginPath(); ctx.moveTo(x1, scanY); ctx.lineTo(x2, scanY); ctx.stroke()
+            ctx.fillStyle = 'rgba(56,189,248,0.04)'
+            ctx.fillRect(x1, y1, x2 - x1, y2 - y1)
+          }
 
-          const cs = Math.min((x2 - x1) * 0.18, 22)
-          ctx.lineWidth = lw * 2.5
+          // Corner brackets — pulse width while scanning, solid when identified
+          ctx.strokeStyle = color
+          ctx.lineWidth   = scanning ? lw * (2 + pulse * 0.7) : lw * 2.5
+          const cs = Math.min((x2 - x1) * 0.22, 26)
           ;[[x1, y1, 1, 1], [x2, y1, -1, 1], [x1, y2, 1, -1], [x2, y2, -1, -1]].forEach(([cx, cy, dx, dy]) => {
             ctx.beginPath(); ctx.moveTo(cx + dx * cs, cy); ctx.lineTo(cx, cy); ctx.lineTo(cx, cy + dy * cs); ctx.stroke()
           })
 
           if (idf !== null) {
-            const label = found ? `${idf.name} (${idf.score}%)` : 'Not recognised'
+            const label = found ? `${idf.name}  ${idf.score}%` : 'Not recognised'
             const fs = Math.max(13, vw / 38)
             ctx.font = `600 ${fs}px system-ui, sans-serif`
             const labelW = ctx.measureText(label).width + 16
             const labelH = fs + 12
             const labelY = y1 > labelH + 4 ? y1 - 4 : y2 + 4
-            ctx.fillStyle = color + 'dd'
+            ctx.fillStyle = (found ? '#22c55e' : '#ef4444') + 'dd'
             drawRoundRect(ctx, x1, labelY - labelH, labelW, labelH, 5)
             ctx.fill()
             ctx.fillStyle = '#fff'
@@ -286,7 +342,7 @@ export default function App() {
         const form = new FormData()
         form.append('image', blob, 'id.jpg')
         form.append('window_id', windowId)
-        if (active) setDetecting(true)
+        if (active) { setDetecting(true); detectingRef.current = true }
         const res = await fetch(`${API}/attendance/identify`, { method: 'POST', body: form })
         if (res.ok && active) {
           const data = await res.json()
@@ -295,7 +351,7 @@ export default function App() {
           if (data.found) lastGoodBlobRef.current = blob
         }
       } catch {}
-      if (active) { setDetecting(false); setTimeout(identifyLoop, 2000) }
+      if (active) { detectingRef.current = false; setDetecting(false); setTimeout(identifyLoop, 1000) }
     }
     identifyLoop()
     return () => { active = false; identifiedRef.current = null; setIdentified(null); setDetecting(false) }
@@ -312,6 +368,7 @@ export default function App() {
       setEnrollPoseStep(0)
       setEnrollCountdown(3)
       setEnrollFlash(false)
+      setEnrollBonus(false)
       setStep('enroll_camera')
     } catch (err) {
       setMessage(`Camera error: ${err.name}`)
@@ -362,13 +419,34 @@ export default function App() {
 
     try {
       const res  = await fetch(`${API}/attendance/scan-sync`, { method: 'POST', body: form })
+      if (res.status === 429) {
+        setMessage('Please wait a moment before trying again.')
+        setStep('error')
+        return
+      }
+      if (res.status === 503) {
+        setMessage('The face recognition service is temporarily unavailable. Please ask your teacher for assistance.')
+        setStep('error')
+        return
+      }
       const text = await res.text()
       let data
       try { data = JSON.parse(text) } catch { data = { status: 'error', message: text } }
-      setMessage(data.message || 'Unknown response')
+
+      const msg = data.message || 'Unknown response'
+      setMessage(msg)
       if (data.student_name) setCheckedInName(data.student_name)
       setNotRecognised(data.status === 'not_recognised')
-      setStep(data.status === 'present' ? 'done' : 'error')
+
+      if (data.status === 'present') {
+        setStep('done')
+      } else if (data.status === 'already_present') {
+        // Show success if they're already marked present
+        if (data.student_name) setCheckedInName(data.student_name)
+        setStep('done')
+      } else {
+        setStep('error')
+      }
     } catch (err) {
       setMessage(`Network error: ${err.message}`)
       setStep('error')
@@ -404,6 +482,20 @@ export default function App() {
           </div>
         )}
 
+        {/* ── SESSION CLOSED (expired while in-flow) ── */}
+        {expired && step !== 'done' && step !== 'enter' && (
+          <div className="bg-red-950 border border-red-700 rounded-2xl p-8 text-center space-y-3">
+            <p className="text-red-300 font-semibold text-lg">Session Closed</p>
+            <p className="text-gray-400 text-sm">The attendance window has ended. Contact your teacher if you need to be marked present.</p>
+            <button
+              onClick={() => { stopCamera(); setStep('enter') }}
+              className="bg-gray-700 hover:bg-gray-600 rounded-xl px-6 py-2.5 text-sm font-medium transition-colors"
+            >
+              Back to Start
+            </button>
+          </div>
+        )}
+
         {/* ── ENTER ── */}
         {step === 'enter' && (
           <div className="bg-gray-800 border border-gray-700 rounded-2xl p-6 space-y-3">
@@ -420,7 +512,10 @@ export default function App() {
             )}
 
             {expired ? (
-              <p className="text-red-400 text-sm text-center py-2">This attendance session has already closed.</p>
+              <div className="text-center py-2 space-y-2">
+                <p className="text-red-400 text-sm font-medium">This attendance session has closed.</p>
+                <p className="text-gray-500 text-xs">Contact your teacher if you need to be marked present.</p>
+              </div>
             ) : windowId ? (
               <>
                 <p className="text-gray-400 text-sm text-center pb-1">How would you like to check in?</p>
@@ -453,58 +548,60 @@ export default function App() {
 
         {/* ── CAMERA ── */}
         {step === 'camera' && (
-          <div className="space-y-3">
+          <div className="space-y-2">
             <video ref={videoRef} autoPlay playsInline muted className="hidden" />
-            <canvas ref={displayRef} className="w-full block rounded-2xl bg-black" />
             <canvas ref={captureRef} className="hidden" />
 
-            {/* Status pill */}
-            <div className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium ${
-              recognized
-                ? 'bg-green-900/50 border border-green-700 text-green-300'
-                : detecting && fastBbox
-                ? 'bg-indigo-900/50 border border-indigo-700 text-indigo-300'
-                : fastBbox && identified && !identified.found
-                ? 'bg-red-900/50 border border-red-700 text-red-300'
-                : 'bg-gray-800 border border-gray-700 text-gray-400'
-            }`}>
-              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                recognized ? 'bg-green-400 animate-pulse'
-                  : detecting && fastBbox ? 'bg-indigo-400 animate-pulse'
-                  : fastBbox && identified && !identified.found ? 'bg-red-400'
-                  : 'bg-gray-500 animate-pulse'
-              }`} />
-              {recognized && checkInCountdown !== null
-                ? `Recognised: ${identified.name} — checking in in ${checkInCountdown}s…`
-                : recognized
-                ? `Recognised: ${identified.name}`
-                : detecting && fastBbox
-                ? 'Hold still — scanning…'
-                : fastBbox && identified && !identified.found
-                ? 'Not recognised — try adjusting your angle or lighting'
-                : fastBbox
-                ? 'Face detected — scanning…'
-                : 'Point your camera at your face'}
-            </div>
+            {/* Camera feed + all overlays */}
+            <div className="relative rounded-2xl overflow-hidden bg-black">
+              <canvas ref={displayRef} className="w-full block" />
 
-            {/* Check In button shows countdown or normal state */}
-            <button
-              onClick={doCheckIn}
-              disabled={!recognized}
-              className={`w-full rounded-xl py-3.5 font-bold text-lg transition-colors ${
-                recognized
-                  ? 'bg-green-600 hover:bg-green-500'
-                  : 'bg-green-600 opacity-40 cursor-not-allowed'
-              }`}
-            >
-              {checkInCountdown !== null
-                ? `Auto check-in in ${checkInCountdown}s — tap to skip`
-                : 'Check In'}
-            </button>
+              {/* Status badge — top overlay */}
+              <div className="absolute top-3 inset-x-0 flex justify-center pointer-events-none">
+                <div className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium backdrop-blur-md bg-black/55 transition-colors duration-300 ${
+                  recognized                                       ? 'text-green-300'
+                  : detecting                                      ? 'text-sky-300'
+                  : fastBbox && identified && !identified.found    ? 'text-red-300'
+                  : 'text-gray-300'
+                }`}>
+                  <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 transition-colors duration-300 ${
+                    recognized                                       ? 'bg-green-400'
+                    : detecting                                      ? 'bg-sky-400 animate-pulse'
+                    : fastBbox && identified && !identified.found    ? 'bg-red-400'
+                    : 'bg-gray-400 animate-pulse'
+                  }`} />
+                  {recognized && checkInCountdown !== null
+                    ? `${identified.name} — auto in ${checkInCountdown}s`
+                    : recognized
+                    ? `${identified.name} — tap to check in`
+                    : detecting
+                    ? 'Scanning…'
+                    : fastBbox && identified && !identified.found
+                    ? 'Not recognised — try a different angle'
+                    : fastBbox
+                    ? 'Face detected…'
+                    : 'Point your face at the camera'}
+                </div>
+              </div>
+
+              {/* Check-in button — bottom overlay, only when recognised */}
+              {recognized && (
+                <div className="absolute bottom-0 inset-x-0 p-4 bg-gradient-to-t from-black/75 to-transparent">
+                  <button
+                    onClick={doCheckIn}
+                    className="w-full bg-green-500/90 hover:bg-green-400/90 active:scale-95 backdrop-blur-sm rounded-xl py-4 font-bold text-white text-lg transition-all"
+                  >
+                    {checkInCountdown !== null
+                      ? `Check In  (auto in ${checkInCountdown}s)`
+                      : 'Check In Now'}
+                  </button>
+                </div>
+              )}
+            </div>
 
             <button
               onClick={() => { stopCamera(); setStep('enter') }}
-              className="w-full text-gray-500 hover:text-gray-300 text-sm transition-colors py-1"
+              className="w-full text-gray-600 hover:text-gray-400 text-sm transition-colors py-1"
             >
               Cancel
             </button>
@@ -513,12 +610,49 @@ export default function App() {
 
         {/* ── SCANNING ── */}
         {step === 'scanning' && (
-          <div className="bg-gray-800 border border-gray-700 rounded-2xl p-10 text-center space-y-5">
-            <div className="w-14 h-14 mx-auto border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-            <div>
-              <p className="text-white font-semibold">Verifying identity…</p>
-              <p className="text-gray-400 text-sm mt-1">Please wait, do not close this tab</p>
+          <div className="bg-gray-800 border border-gray-700 rounded-2xl p-8 space-y-6">
+            {/* Pulsing face ring */}
+            <div className="relative w-24 h-24 mx-auto flex items-center justify-center">
+              <div className="absolute inset-0 rounded-full border-2 border-indigo-500/20 animate-ping" />
+              <div className="absolute inset-1 rounded-full border-2 border-indigo-500/50 animate-pulse" />
+              <svg className="w-10 h-10 text-indigo-400" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
+                <circle cx="12" cy="8" r="4" />
+                <path strokeLinecap="round" d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
+              </svg>
             </div>
+
+            {/* Stage labels */}
+            <div className="space-y-3.5">
+              {[
+                { label: 'Face captured',     done: true,          active: false },
+                { label: 'Detecting face',    done: scanStage >= 1, active: scanStage === 0 },
+                { label: 'Verifying identity', done: false,         active: scanStage >= 1 },
+                { label: 'Marking present',   done: false,          active: false },
+              ].map(({ label, done, active }) => (
+                <div key={label} className="flex items-center gap-3">
+                  <div className={`w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center transition-colors ${
+                    done   ? 'bg-green-500'
+                    : active ? 'bg-indigo-500 animate-pulse'
+                    : 'bg-gray-600'
+                  }`}>
+                    {done && (
+                      <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                      </svg>
+                    )}
+                  </div>
+                  <span className={`text-sm transition-colors ${
+                    done   ? 'text-green-400'
+                    : active ? 'text-white font-medium'
+                    : 'text-gray-500'
+                  }`}>
+                    {label}{active ? '…' : ''}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            <p className="text-gray-500 text-xs text-center">Please wait · do not close this tab</p>
           </div>
         )}
 
@@ -535,7 +669,9 @@ export default function App() {
                 Welcome,<br />{checkedInName}!
               </p>
             )}
-            <p className="text-green-400 font-semibold text-lg">Attendance Recorded</p>
+            <p className="text-green-400 font-semibold text-lg">
+              {message.includes('already') ? 'Already Checked In' : 'Attendance Recorded'}
+            </p>
             <p className="text-gray-500 text-sm pt-2">You can close this tab.</p>
           </div>
         )}
@@ -579,18 +715,23 @@ export default function App() {
             <input
               className="w-full bg-gray-700 rounded-lg px-4 py-3 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
               placeholder="Full Name"
+              maxLength={100}
               value={enrollName}
-              onChange={e => setEnrollName(e.target.value)}
+              onChange={e => setEnrollName(e.target.value.replace(/[<>]/g, ''))}
             />
             <input
               className="w-full bg-gray-700 rounded-lg px-4 py-3 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              placeholder="Student ID"
+              placeholder="Student ID (letters, digits, - or _)"
+              maxLength={50}
               value={enrollNumber}
-              onChange={e => setEnrollNumber(e.target.value)}
+              onChange={e => setEnrollNumber(e.target.value.replace(/[^A-Za-z0-9\-_]/g, ''))}
             />
+            {enrollNumber && !/^[A-Za-z0-9\-_]{2,}$/.test(enrollNumber) && (
+              <p className="text-yellow-400 text-xs -mt-2">Student ID must be at least 2 characters: letters, digits, - or _</p>
+            )}
             <button
               onClick={startEnrollCamera}
-              disabled={!enrollName.trim() || !enrollNumber.trim()}
+              disabled={enrollName.trim().length < 2 || !/^[A-Za-z0-9\-_]{2,}$/.test(enrollNumber)}
               className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl py-3 font-semibold transition-colors"
             >
               Continue to Camera
@@ -629,21 +770,32 @@ export default function App() {
 
             {/* Pose instruction */}
             <div className="bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-center">
-              <p className="text-white font-semibold">{ENROLL_POSES[enrollPoseStep]?.label}</p>
-              <p className="text-gray-400 text-sm mt-0.5">{ENROLL_POSES[enrollPoseStep]?.sub}</p>
+              {enrollBonus ? (
+                <>
+                  <p className="text-white font-semibold">Hold still for a moment</p>
+                  <p className="text-gray-400 text-sm mt-0.5">Getting a few extra angles…</p>
+                </>
+              ) : (
+                <>
+                  <p className="text-white font-semibold">{ENROLL_POSES[enrollPoseStep]?.label}</p>
+                  <p className="text-gray-400 text-sm mt-0.5">{ENROLL_POSES[enrollPoseStep]?.sub}</p>
+                </>
+              )}
             </div>
 
-            {/* Progress dots */}
+            {/* Progress dots (guided poses only) */}
             <div className="flex justify-center gap-3">
               {ENROLL_POSES.map((_, i) => (
                 <div key={i} className={`w-3 h-3 rounded-full transition-all duration-300 ${
-                  i < enrollPhotos.length ? 'bg-green-400 scale-110'
-                    : i === enrollPoseStep ? 'bg-white animate-pulse'
+                  i < Math.min(enrollPhotos.length, ENROLL_POSES.length) ? 'bg-green-400 scale-110'
+                    : i === enrollPoseStep && !enrollBonus ? 'bg-white animate-pulse'
                     : 'bg-gray-600'
                 }`} />
               ))}
             </div>
-            <p className="text-gray-500 text-xs text-center">{enrollPhotos.length} / {ENROLL_POSES.length} photos captured — hold still</p>
+            <p className="text-gray-500 text-xs text-center">
+              {enrollPhotos.length} / {ENROLL_POSES.length + ENROLL_BONUS} photos captured — hold still
+            </p>
 
             <button
               onClick={() => { stopEnrollCamera(); setEnrollPhotos([]); setStep('enroll_form') }}
@@ -656,11 +808,22 @@ export default function App() {
 
         {/* ── ENROLLING ── */}
         {step === 'enrolling' && (
-          <div className="bg-gray-800 border border-gray-700 rounded-2xl p-10 text-center space-y-5">
-            <div className="w-14 h-14 mx-auto border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-            <div>
-              <p className="text-white font-semibold">Enrolling your face…</p>
-              <p className="text-gray-400 text-sm mt-1">This may take a few seconds</p>
+          <div className="bg-gray-800 border border-gray-700 rounded-2xl p-8 space-y-5">
+            <div className="relative w-24 h-24 mx-auto flex items-center justify-center">
+              <div className="absolute inset-0 rounded-full border-2 border-indigo-500/20 animate-ping" />
+              <div className="absolute inset-1 rounded-full border-2 border-indigo-500/50 animate-pulse" />
+              <svg className="w-10 h-10 text-indigo-400" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v4m0 0a4 4 0 100 8 4 4 0 000-8zm0 12v4M4 12H0m4 0a8 8 0 0116 0" />
+              </svg>
+            </div>
+            <div className="text-center">
+              <p className="text-white font-semibold">Building your face profile…</p>
+              <p className="text-gray-400 text-sm mt-1">Processing {ENROLL_POSES.length} poses × 3 variations</p>
+            </div>
+            <div className="flex gap-1.5 justify-center pt-1">
+              {ENROLL_POSES.map((_, i) => (
+                <div key={i} className="w-2 h-2 rounded-full bg-indigo-500 animate-bounce" style={{ animationDelay: `${i * 0.12}s` }} />
+              ))}
             </div>
           </div>
         )}

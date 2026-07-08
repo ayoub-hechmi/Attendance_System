@@ -24,6 +24,25 @@ if ($detectedIp) {
     Write-Host "  Could not detect host IP - QR code will use localhost" -ForegroundColor Yellow
 }
 
+# Generate HTTPS certs for teacher dashboard if missing (requires mkcert in PATH)
+$dashCertPath = "$root\frontend\teacher-dashboard\cert.pem"
+if (-not (Test-Path $dashCertPath)) {
+    Write-Host "Generating HTTPS certificate for teacher dashboard..." -ForegroundColor Cyan
+    Push-Location "$root\frontend\teacher-dashboard"
+    if ($detectedIp) {
+        mkcert localhost $detectedIp 2>$null
+    } else {
+        mkcert localhost 2>$null
+    }
+    $certFile = Get-ChildItem -Filter "localhost+*.pem" -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notmatch "-key" } | Select-Object -First 1
+    $keyFile  = Get-ChildItem -Filter "localhost+*-key.pem" -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+    if ($certFile) { Rename-Item $certFile.FullName "cert.pem" -Force }
+    if ($keyFile)  { Rename-Item $keyFile.FullName  "key.pem"  -Force }
+    Pop-Location
+}
+
 Write-Host "Starting PostgreSQL + Redis via Docker..." -ForegroundColor Cyan
 docker compose up db redis -d
 
@@ -66,7 +85,7 @@ Start-Process powershell -ArgumentList "-NoExit", "-Command", "
 Write-Host ""
 Write-Host "All services started!" -ForegroundColor Green
 Write-Host "  Student App:       https://localhost:5173" -ForegroundColor White
-Write-Host "  Teacher Dashboard: http://localhost:5174" -ForegroundColor White
+Write-Host "  Teacher Dashboard: https://localhost:5174" -ForegroundColor White
 Write-Host "  Backend API docs:  http://localhost:8000/docs" -ForegroundColor White
 if ($detectedIp) {
     Write-Host "  QR codes will use: https://$($detectedIp):5173" -ForegroundColor White
