@@ -12,6 +12,7 @@ const POSES = [
   { label: 'Tilt your head slightly UP',    sub: 'Look a little toward the ceiling' },
   { label: 'Tilt your head slightly DOWN',  sub: 'Look a little toward the floor' },
 ]
+const BONUS_FRAMES = 5
 
 // ── FaceCaptureModal ──────────────────────────────────────────────────────────
 function FaceCaptureModal({ onDone, onClose }) {
@@ -22,6 +23,7 @@ function FaceCaptureModal({ onDone, onClose }) {
   const [countdown, setCountdown] = useState(3)
   const [captured, setCaptured]   = useState(0)
   const [flash, setFlash]         = useState(false)
+  const [bonus, setBonus]         = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -72,6 +74,29 @@ function FaceCaptureModal({ onDone, onClose }) {
         setCaptured(blobs.length)
         await sleep(500)
       }
+
+      // Bonus frames — silent captures after the guided poses
+      if (!cancelled && blobs.length > 0) {
+        setBonus(true)
+        for (let b = 0; b < BONUS_FRAMES; b++) {
+          if (cancelled) return
+          const video  = videoRef.current
+          const canvas = canvasRef.current
+          if (video && canvas) {
+            canvas.width  = video.videoWidth  || 640
+            canvas.height = video.videoHeight || 480
+            canvas.getContext('2d').drawImage(video, 0, 0)
+            setFlash(true)
+            setTimeout(() => setFlash(false), 120)
+            const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92))
+            blobs.push(blob)
+            setCaptured(blobs.length)
+          }
+          await sleep(400)
+        }
+        setBonus(false)
+      }
+
       if (!cancelled) { setPhase('done'); onDone(blobs) }
     })()
     return () => { cancelled = true }
@@ -114,17 +139,28 @@ function FaceCaptureModal({ onDone, onClose }) {
           {phase === 'capturing' && (
             <>
               <div className="text-center">
-                <p className="text-white font-semibold text-base">{POSES[step].label}</p>
-                <p className="text-gray-400 text-sm mt-0.5">{POSES[step].sub}</p>
+                {bonus ? (
+                  <>
+                    <p className="text-white font-semibold text-base">Hold still for a moment</p>
+                    <p className="text-gray-400 text-sm mt-0.5">Getting a few extra angles…</p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-white font-semibold text-base">{POSES[step].label}</p>
+                    <p className="text-gray-400 text-sm mt-0.5">{POSES[step].sub}</p>
+                  </>
+                )}
               </div>
               <div className="flex justify-center gap-3">
                 {POSES.map((_, i) => (
                   <div key={i} className={`w-3 h-3 rounded-full transition-all duration-300 ${
-                    i < captured ? 'bg-green-400 scale-110' : i === step ? 'bg-white animate-pulse' : 'bg-gray-600'
+                    i < Math.min(captured, POSES.length) ? 'bg-green-400 scale-110'
+                      : i === step && !bonus ? 'bg-white animate-pulse'
+                      : 'bg-gray-600'
                   }`} />
                 ))}
               </div>
-              <p className="text-gray-500 text-xs text-center">{captured} / {POSES.length} photos captured</p>
+              <p className="text-gray-500 text-xs text-center">{captured} / {POSES.length + BONUS_FRAMES} photos captured</p>
             </>
           )}
           {phase === 'done' && <p className="text-green-400 text-sm text-center font-medium">Uploading to the system…</p>}
@@ -399,6 +435,26 @@ export default function App() {
     }, 1000)
     return () => clearInterval(id)
   }, [closesAt])
+
+  // ── Restore active window on load/class-switch ────────────────────────────
+  async function restoreActiveWindow(classId) {
+    try {
+      const res = await fetch(`${API}/attendance/history?class_id=${classId}`, { headers: auth })
+      if (!res.ok) return
+      const sessions = await res.json()
+      const active = sessions.find(s => s.is_open && new Date(s.closes_at) > new Date())
+      if (active) {
+        setWindowId(active.id)
+        setClosesAt(new Date(active.closes_at))
+        await fetchRoster(active.id)
+      }
+    } catch {}
+  }
+
+  useEffect(() => {
+    if (!token || !selectedClass) return
+    restoreActiveWindow(selectedClass.id)
+  }, [token, selectedClass]) // eslint-disable-line
 
   // ── Session actions ────────────────────────────────────────────────────────
   async function openWindow() {
@@ -1429,7 +1485,19 @@ export default function App() {
                             </div>
                           </div>
                           <div className="flex gap-2 flex-shrink-0">
-                            {!h.is_open && (
+                            {h.is_open && new Date(h.closes_at) > new Date() ? (
+                              <button
+                                onClick={async () => {
+                                  setWindowId(h.id)
+                                  setClosesAt(new Date(h.closes_at))
+                                  await fetchRoster(h.id)
+                                  setTab('session')
+                                }}
+                                className="bg-green-800 hover:bg-green-700 rounded-xl px-4 py-2 text-sm font-medium transition"
+                              >
+                                → View Live
+                              </button>
+                            ) : !h.is_open ? (
                               <button
                                 onClick={() => reopenWindow(h.id, 5)}
                                 className="bg-indigo-800 hover:bg-indigo-700 rounded-xl px-4 py-2 text-sm font-medium transition"
@@ -1437,7 +1505,7 @@ export default function App() {
                               >
                                 ↺ Re-open
                               </button>
-                            )}
+                            ) : null}
                             <button
                               onClick={() => downloadHistorySession(h.id, h.date, timeStr, selectedClass?.name)}
                               className="bg-gray-700 hover:bg-gray-600 rounded-xl px-4 py-2 text-sm font-medium transition"

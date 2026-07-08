@@ -1,5 +1,7 @@
 """Admin portal for enrolling students and uploading face photos."""
+import asyncio
 import io
+import logging
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from PIL import Image, ImageEnhance
@@ -7,10 +9,14 @@ from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.models import Attendance, AttendanceWindow, Class, ClassStudent, FaceVector, Student
 from app.routers.auth import get_current_teacher
 from app.services.ai_client import detect_face, embed_face
+from app.services.vector_backup import write_vector_backup
+
+logger = logging.getLogger(__name__)
 
 _BRIGHTNESS_FACTORS = [1.0, 0.70, 1.25]
 _MIN_MEAN_BRIGHTNESS = 15
@@ -149,13 +155,15 @@ async def list_students(
     db: AsyncSession = Depends(get_db),
     teacher=Depends(get_current_teacher),
 ):
-    # Students in this class via junction table
-    ids_result = await db.execute(
-        select(ClassStudent.student_id).where(ClassStudent.class_id == class_id)
-    )
-    student_ids = [row[0] for row in ids_result.all()]
-    if not student_ids:
+    # Students in this class + the date each was added
+    cs_rows = (await db.execute(
+        select(ClassStudent.student_id, ClassStudent.added_at).where(ClassStudent.class_id == class_id)
+    )).all()
+    if not cs_rows:
         return []
+
+    student_ids   = [row[0] for row in cs_rows]
+    added_at_map  = {row[0]: row[1] for row in cs_rows}   # student_id → enrolled-in-class timestamp
 
     students = (await db.execute(
         select(Student).where(Student.id.in_(student_ids))
@@ -167,23 +175,30 @@ async def list_students(
         fv_result = await db.execute(select(FaceVector).where(FaceVector.student_id == s.id))
         face_counts[s.id] = len(fv_result.scalars().all())
 
-    # Attendance stats
-    total_sessions = (await db.execute(
-        select(func.count(AttendanceWindow.id)).where(AttendanceWindow.class_id == class_id)
-    )).scalar() or 0
-
+    # Per-student attendance stats — only count sessions opened on or after the student joined
     attendance_counts = {}
+    sessions_totals   = {}
     latest_enrollment = {}
     for s in students:
-        count = (await db.execute(
+        joined_at = added_at_map.get(s.id)
+
+        sessions_q = select(func.count(AttendanceWindow.id)).where(
+            AttendanceWindow.class_id == class_id
+        )
+        att_q = (
             select(func.count(Attendance.id))
             .join(AttendanceWindow, Attendance.window_id == AttendanceWindow.id)
             .where(
                 Attendance.student_id == s.id,
                 AttendanceWindow.class_id == class_id,
             )
-        )).scalar() or 0
-        attendance_counts[s.id] = count
+        )
+        if joined_at is not None:
+            sessions_q = sessions_q.where(AttendanceWindow.opened_at >= joined_at)
+            att_q      = att_q.where(AttendanceWindow.opened_at >= joined_at)
+
+        sessions_totals[s.id]   = (await db.execute(sessions_q)).scalar() or 0
+        attendance_counts[s.id] = (await db.execute(att_q)).scalar() or 0
 
         latest = (await db.execute(
             select(func.max(FaceVector.created_at)).where(FaceVector.student_id == s.id)
@@ -199,7 +214,7 @@ async def list_students(
             "face_enrolled": face_counts.get(s.id, 0) > 0,
             "face_count": face_counts.get(s.id, 0),
             "sessions_attended": attendance_counts.get(s.id, 0),
-            "sessions_total": total_sessions,
+            "sessions_total": sessions_totals.get(s.id, 0),
             "last_enrolled_at": latest_enrollment[s.id].isoformat() if latest_enrollment.get(s.id) else None,
         }
         for s in students
@@ -280,10 +295,23 @@ async def upload_face(
             continue
 
         embedding = await embed_face(aug_bytes, bbox)
-        db.add(FaceVector(student_id=student_id, embedding=embedding))
+        db.add(FaceVector(student_id=student_id, embedding=embedding, source="enrolled"))
         vectors_stored += 1
 
     await db.commit()
+
+    if settings.vectors_backup_dir and vectors_stored > 0:
+        all_vecs = (await db.execute(
+            select(FaceVector).where(FaceVector.student_id == student_id)
+        )).scalars().all()
+        embeddings = [list(fv.embedding) for fv in all_vecs]
+        await asyncio.to_thread(
+            write_vector_backup,
+            settings.vectors_backup_dir,
+            student.id, student.student_number, student.name,
+            embeddings,
+        )
+
     return {"status": "enrolled", "student_id": student_id, "vectors_stored": vectors_stored}
 
 

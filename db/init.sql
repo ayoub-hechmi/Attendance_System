@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS face_vectors (
     id SERIAL PRIMARY KEY,
     student_id INTEGER REFERENCES students(id) ON DELETE CASCADE,
     embedding vector(512) NOT NULL,
+    source VARCHAR(20) NOT NULL DEFAULT 'enrolled',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 

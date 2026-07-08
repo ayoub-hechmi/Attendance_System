@@ -1,8 +1,11 @@
+import asyncio
 import io
 import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import List
+
+import numpy as np
 
 import httpx
 from PIL import Image, ImageEnhance
@@ -16,6 +19,7 @@ from app.core.limiter import limiter
 from app.models.models import Attendance, AttendanceWindow, Class, ClassStudent, FaceVector, Student
 from app.routers.auth import get_current_teacher
 from app.services.ai_client import check_worker_health, cosine_similarity, detect_face, detect_face_fast, detect_face_for_scan, embed_face
+from app.services.vector_backup import write_vector_backup
 from app.services.websocket_manager import manager
 from app.tasks import process_scan
 
@@ -56,21 +60,54 @@ async def _students_in_class(class_id: int, db: AsyncSession):
     return (await db.execute(select(Student).where(Student.id.in_(student_ids)))).scalars().all()
 
 
+def _centroid_sim(live_vector: list, enrolled_vecs: list) -> float:
+    """Cosine similarity between live_vector and the centroid of enrolled_vecs."""
+    if not enrolled_vecs:
+        return 1.0  # nothing to check against — let it through
+    mat = np.array([list(fv.embedding) for fv in enrolled_vecs], dtype=np.float32)
+    centroid = mat.mean(axis=0)
+    c_norm = np.linalg.norm(centroid)
+    v = np.array(live_vector, dtype=np.float32)
+    v_norm = np.linalg.norm(v)
+    if c_norm == 0 or v_norm == 0:
+        return 0.0
+    return float(np.dot(v / v_norm, centroid / c_norm))
+
+
 async def _best_match(live_vector, class_id: int, db: AsyncSession):
-    """Return (student, score) for the best face match in a class, or (None, 0)."""
+    """Return (student, best_score, second_best_score).
+
+    Option 5: enrolled vectors count at full weight; scan-derived at 0.5×.
+    This prevents scan-accumulated embeddings from overriding the ground-truth
+    enrolled profile.
+    """
     students = await _students_in_class(class_id, db)
-    best_score = 0.0
-    best_student = None
+    scores = []
     for student in students:
         vecs = (await db.execute(select(FaceVector).where(FaceVector.student_id == student.id))).scalars().all()
         if not vecs:
             continue
-        score = max(cosine_similarity(live_vector, fv.embedding) for fv in vecs)
-        logger.info("Face match score for %s: %.4f (threshold: %.2f)", student.name, score, settings.face_similarity_threshold)
-        if score > best_score:
-            best_score = score
-            best_student = student
-    return best_student, best_score
+
+        enrolled = [fv for fv in vecs if (fv.source or "enrolled") == "enrolled"]
+        scan    = [fv for fv in vecs if (fv.source or "enrolled") == "scan"]
+
+        e_score = max((cosine_similarity(live_vector, fv.embedding) for fv in enrolled), default=0.0)
+        s_score = max((cosine_similarity(live_vector, fv.embedding) for fv in scan),     default=0.0)
+        score   = max(e_score, s_score * 0.5)
+
+        logger.info(
+            "Face match: %s enrolled=%.4f scan=%.4f weighted=%.4f (threshold=%.2f)",
+            student.name, e_score, s_score, score, settings.face_similarity_threshold,
+        )
+        scores.append((score, student))
+
+    if not scores:
+        return None, 0.0, 0.0
+
+    scores.sort(key=lambda x: x[0], reverse=True)
+    best_score, best_student = scores[0]
+    second_best = scores[1][0] if len(scores) > 1 else 0.0
+    return best_student, best_score, second_best
 
 
 async def _notify_teacher(class_id: int, student, score: float):
@@ -128,9 +165,10 @@ async def identify_face(
         return {"found": False, "bbox": None, "name": None}
 
     live_vector = await embed_face(image_bytes, bbox)
-    student, score = await _best_match(live_vector, window.class_id, db)
+    student, score, second = await _best_match(live_vector, window.class_id, db)
 
-    if student and score >= settings.face_similarity_threshold:
+    margin_ok = (score - second) >= settings.face_match_margin
+    if student and score >= settings.face_similarity_threshold and margin_ok:
         return {"found": True, "bbox": bbox, "name": student.name, "student_number": student.student_number, "score": round(score * 100, 1)}
     return {"found": False, "bbox": bbox, "name": None, "score": None}
 
@@ -173,9 +211,14 @@ async def scan_face_sync(
         return {"status": "no_face", "message": "No face detected. Look directly at the camera and try again."}
 
     live_vector = await embed_face(image_bytes, bbox)
-    student, score = await _best_match(live_vector, window.class_id, db)
+    student, score, second = await _best_match(live_vector, window.class_id, db)
 
-    if not student or score < settings.face_similarity_threshold:
+    margin_ok = (score - second) >= settings.face_match_margin
+    if not student or score < settings.face_similarity_threshold or not margin_ok:
+        logger.info(
+            "Scan rejected: score=%.4f threshold=%.2f margin=%.4f (needed %.2f)",
+            score, settings.face_similarity_threshold, score - second, settings.face_match_margin,
+        )
         return {"status": "not_recognised", "message": "Face not recognised. Make sure you are enrolled in this class."}
 
     existing = (await db.execute(
@@ -187,6 +230,29 @@ async def scan_face_sync(
     attendance = Attendance(student_id=student.id, window_id=window_id, status="present", similarity_score=score)
     db.add(attendance)
     await db.commit()
+
+    # Option 2 + 5: only save scan embedding if it is close to the enrolled centroid,
+    # and tag it as scan-derived so _best_match weights it at 0.5×.
+    all_vecs = (await db.execute(
+        select(FaceVector).where(FaceVector.student_id == student.id)
+    )).scalars().all()
+    enrolled_vecs = [fv for fv in all_vecs if (fv.source or "enrolled") == "enrolled"]
+    if _centroid_sim(live_vector, enrolled_vecs) >= settings.face_similarity_threshold:
+        db.add(FaceVector(student_id=student.id, embedding=live_vector, source="scan"))
+        await db.commit()
+    else:
+        logger.info("Scan embedding for %s rejected by centroid check", student.name)
+
+    if settings.vectors_backup_dir:
+        all_vecs = (await db.execute(
+            select(FaceVector).where(FaceVector.student_id == student.id)
+        )).scalars().all()
+        await asyncio.to_thread(
+            write_vector_backup,
+            settings.vectors_backup_dir,
+            student.id, student.student_number, student.name,
+            [list(fv.embedding) for fv in all_vecs],
+        )
 
     await _notify_teacher(window.class_id, student, score)
     return {"status": "present", "student_name": student.name, "message": f"Welcome, {student.name}! You are now marked present."}
@@ -411,7 +477,7 @@ async def self_enroll(
                     buf = io.BytesIO()
                     ImageEnhance.Brightness(base).enhance(factor).save(buf, format="JPEG", quality=90)
                     aug_bytes = buf.getvalue()
-                db.add(FaceVector(student_id=student.id, embedding=await embed_face(aug_bytes, bbox)))
+                db.add(FaceVector(student_id=student.id, embedding=await embed_face(aug_bytes, bbox), source="enrolled"))
                 enrolled += 1
         except Exception:
             continue

@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 import httpx
+import numpy as np
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.pool import NullPool
@@ -14,6 +15,7 @@ from app.celery_app import celery_app
 from app.core.config import settings
 from app.models.models import Attendance, AttendanceWindow, FaceVector, Student
 from app.services.ai_client import cosine_similarity, detect_face, embed_face
+from app.services.vector_backup import write_vector_backup
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +105,37 @@ async def _async_process(image_bytes: bytes, window_id: int, student_number: str
 
         logger.info("Marked student %s present (score=%.3f)", student_number, best_score)
 
-        # 7. Notify teacher dashboard via HTTP → FastAPI → WebSocket
+        # 7. Expand dataset — Option 2: centroid check, Option 5: source tag
+        all_vecs = (await db.execute(
+            select(FaceVector).where(FaceVector.student_id == student.id)
+        )).scalars().all()
+        enrolled_vecs = [fv for fv in all_vecs if (fv.source or "enrolled") == "enrolled"]
+        if enrolled_vecs:
+            mat = np.array([list(fv.embedding) for fv in enrolled_vecs], dtype=np.float32)
+            centroid = mat.mean(axis=0)
+            c_norm = np.linalg.norm(centroid)
+            v = np.array(live_vector, dtype=np.float32)
+            v_norm = np.linalg.norm(v)
+            centroid_sim = float(np.dot(v / v_norm, centroid / c_norm)) if c_norm and v_norm else 0.0
+        else:
+            centroid_sim = 1.0
+
+        if centroid_sim >= settings.face_similarity_threshold:
+            db.add(FaceVector(student_id=student.id, embedding=live_vector, source="scan"))
+            await db.commit()
+            all_vecs = (await db.execute(
+                select(FaceVector).where(FaceVector.student_id == student.id)
+            )).scalars().all()
+
+        if settings.vectors_backup_dir:
+            await asyncio.to_thread(
+                write_vector_backup,
+                settings.vectors_backup_dir,
+                student.id, student.student_number, student.name,
+                [list(fv.embedding) for fv in all_vecs],
+            )
+
+        # 8. Notify teacher dashboard via HTTP → FastAPI → WebSocket
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 await client.post(

@@ -48,8 +48,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       AI_WORKER_URL: http://ai-worker:8001
       SECRET_KEY: ${SECRET_KEY}
-      FACE_SIMILARITY_THRESHOLD: "0.40"
+      FACE_SIMILARITY_THRESHOLD: "0.60"
+      FACE_MATCH_MARGIN: "0.08"
       ATTENDANCE_WINDOW_MINUTES: "3"
+      VECTORS_BACKUP_DIR: /backup
     depends_on:
       db:
         condition: service_healthy
@@ -59,6 +61,7 @@ services:
         condition: service_started
     volumes:
       - ./backend:/app
+      - ./face_vectors_backup:/backup
     restart: unless-stopped
 
   celery-worker:
@@ -69,8 +72,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       AI_WORKER_URL: http://ai-worker:8001
       SECRET_KEY: ${SECRET_KEY}
-      FACE_SIMILARITY_THRESHOLD: "0.40"
+      FACE_SIMILARITY_THRESHOLD: "0.60"
+      FACE_MATCH_MARGIN: "0.08"
       ATTENDANCE_WINDOW_MINUTES: "3"
+      VECTORS_BACKUP_DIR: /backup
     depends_on:
       db:
         condition: service_healthy
@@ -78,6 +83,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      - ./face_vectors_backup:/backup
     restart: unless-stopped
 
 volumes:

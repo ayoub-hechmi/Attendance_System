@@ -50,6 +50,7 @@ class FaceVector(Base):
     id = Column(Integer, primary_key=True)
     student_id = Column(Integer, ForeignKey("students.id", ondelete="CASCADE"))
     embedding = Column(Vector(512), nullable=False)
+    source = Column(String(20), nullable=False, server_default="enrolled")
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     student = relationship("Student", back_populates="face_vectors")
 
