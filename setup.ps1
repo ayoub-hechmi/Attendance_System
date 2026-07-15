@@ -198,7 +198,7 @@ $CertDir = Join-Path $ProjectRoot "frontend\student-app"
 Set-Location $CertDir
 
 Info "Generating certificate for: localhost  127.0.0.1  $LocalIp ..."
-mkcert localhost 127.0.0.1 $LocalIp 2>&1 | Out-Null
+mkcert localhost 127.0.0.1 $LocalIp
 if ($LASTEXITCODE -ne 0) { Fail "mkcert certificate generation failed." }
 
 # Rename to the filenames Vite expects
