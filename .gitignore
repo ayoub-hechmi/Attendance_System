@@ -8,6 +8,7 @@ __pycache__/
 
 # Environment & secrets
 .env
+*.sql
 backend/.env
 backend/.host_ip
 
