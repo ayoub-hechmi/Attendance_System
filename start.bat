@@ -34,7 +34,7 @@ if not exist "%~dp0frontend\student-app\node_modules" (
     npm install
     popd
 )
-powershell -Command "Start-Process powershell -ArgumentList '-NoExit','-Command','cd \"%~dp0frontend\student-app\"; npm run dev'"
+start "Student App" powershell.exe -NoExit -ExecutionPolicy Bypass -Command "Set-Location '%~dp0frontend\student-app'; npm run dev"
 
 :: Teacher Dashboard — install deps if missing, then launch in new window
 echo [3/3] Starting Teacher Dashboard (port 5174)...
@@ -44,13 +44,13 @@ if not exist "%~dp0frontend\teacher-dashboard\node_modules" (
     npm install
     popd
 )
-powershell -Command "Start-Process powershell -ArgumentList '-NoExit','-Command','cd \"%~dp0frontend\teacher-dashboard\"; npm run dev'"
+start "Teacher Dashboard" powershell.exe -NoExit -ExecutionPolicy Bypass -Command "Set-Location '%~dp0frontend\teacher-dashboard'; npm run dev"
 
 :: Wait a few seconds for dev servers to start, then open browsers
 echo Waiting for dev servers to start...
 timeout /t 5 /nobreak >nul
 start "" "http://localhost:5174"
-start "" "http://localhost:5173"
+start "" "https://localhost:5173"
 
 echo.
 echo ============================================================
