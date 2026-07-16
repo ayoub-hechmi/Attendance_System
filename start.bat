@@ -46,6 +46,12 @@ if not exist "%~dp0frontend\teacher-dashboard\node_modules" (
 )
 powershell -Command "Start-Process powershell -ArgumentList '-NoExit','-Command','cd \"%~dp0frontend\teacher-dashboard\"; npm run dev'"
 
+:: Wait a few seconds for dev servers to start, then open browsers
+echo Waiting for dev servers to start...
+timeout /t 5 /nobreak >nul
+start "" "http://localhost:5174"
+start "" "http://localhost:5173"
+
 echo.
 echo ============================================================
 echo   All services started!
