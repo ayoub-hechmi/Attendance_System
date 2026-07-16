@@ -25,25 +25,25 @@ if errorlevel 1 (
 echo       Done. Backend running on http://localhost:8000
 echo.
 
-:: Student App
+:: Student App — install deps if missing, then launch in new window
 echo [2/3] Starting Student App (port 5173)...
-if not exist "frontend\student-app\node_modules" (
+if not exist "%~dp0frontend\student-app\node_modules" (
     echo       Installing npm dependencies (first run only)...
-    cd frontend\student-app
+    pushd "%~dp0frontend\student-app"
     npm install
-    cd ..\..
+    popd
 )
-start "Student App" cmd /k "cd /d %~dp0frontend\student-app && npm run dev"
+powershell -Command "Start-Process powershell -ArgumentList '-NoExit','-Command','cd \"%~dp0frontend\student-app\"; npm run dev'"
 
-:: Teacher Dashboard
+:: Teacher Dashboard — install deps if missing, then launch in new window
 echo [3/3] Starting Teacher Dashboard (port 5174)...
-if not exist "frontend\teacher-dashboard\node_modules" (
+if not exist "%~dp0frontend\teacher-dashboard\node_modules" (
     echo       Installing npm dependencies (first run only)...
-    cd frontend\teacher-dashboard
+    pushd "%~dp0frontend\teacher-dashboard"
     npm install
-    cd ..\..
+    popd
 )
-start "Teacher Dashboard" cmd /k "cd /d %~dp0frontend\teacher-dashboard && npm run dev"
+powershell -Command "Start-Process powershell -ArgumentList '-NoExit','-Command','cd \"%~dp0frontend\teacher-dashboard\"; npm run dev'"
 
 echo.
 echo ============================================================
@@ -54,7 +54,7 @@ echo   API Docs          : http://localhost:8000/docs
 echo   Student App       : https://localhost:5173  (needs HTTPS)
 echo ============================================================
 echo.
-echo Close the opened terminal windows to stop the frontend apps.
+echo Close the opened PowerShell windows to stop the frontend apps.
 echo To stop Docker services: docker compose down
 echo.
 pause
