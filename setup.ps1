@@ -13,9 +13,12 @@ function Warn { param($m)    Write-Host ("    [!!]  $m") -ForegroundColor Yellow
 function Fail { param($m)    Write-Host ("    [ERR] $m") -ForegroundColor Red; exit 1 }
 
 function Install-App {
-    param($id, $name)
+    param($id, $name, $cmd)
     Info "Installing $name via winget..."
     winget install --id $id --accept-source-agreements --accept-package-agreements --silent 2>&1 | Out-Null
+    Refresh-Path
+    # If the tool is now in PATH, the install succeeded regardless of winget exit code
+    if ($cmd -and (Get-Command $cmd -ErrorAction SilentlyContinue)) { return }
     # -1978335189 = APPINSTALLER_ERROR_ALREADY_INSTALLED — treat as success
     if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
         Fail "Failed to install $name (exit $LASTEXITCODE). Install it manually and re-run."
@@ -55,7 +58,7 @@ OK "winget found"
 Step 2 "Git"
 $gitCmd = Get-Command git -ErrorAction SilentlyContinue
 if (-not $gitCmd) {
-    Install-App "Git.Git" "Git"
+    Install-App "Git.Git" "Git" "git"
     Refresh-Path
     $gitCmd = Get-Command git -ErrorAction SilentlyContinue
     if (-not $gitCmd) {
@@ -79,7 +82,7 @@ if ($nodeCmd) {
     }
 }
 if ($needNode) {
-    Install-App "OpenJS.NodeJS.LTS" "Node.js LTS"
+    Install-App "OpenJS.NodeJS.LTS" "Node.js LTS" "node"
     Refresh-Path
     OK "Node.js $((node --version).Trim())"
 }
@@ -89,7 +92,7 @@ Step 4 "Docker Desktop"
 $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
 if (-not $dockerCmd) {
     Warn "Docker Desktop not found. Installing (~500 MB download)..."
-    Install-App "Docker.DockerDesktop" "Docker Desktop"
+    Install-App "Docker.DockerDesktop" "Docker Desktop" "docker"
     Write-Host ""
     Warn "Docker Desktop installed. A system restart is required."
     Warn "After restarting: open Docker Desktop, wait for it to load, then re-run this script."
@@ -115,7 +118,7 @@ OK "$(docker --version)"
 Step 5 "mkcert"
 $mkcertCmd = Get-Command mkcert -ErrorAction SilentlyContinue
 if (-not $mkcertCmd) {
-    Install-App "FiloSottile.mkcert" "mkcert"
+    Install-App "FiloSottile.mkcert" "mkcert" "mkcert"
     Refresh-Path
     $mkcertCmd = Get-Command mkcert -ErrorAction SilentlyContinue
     if (-not $mkcertCmd) {
