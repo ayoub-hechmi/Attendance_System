@@ -13,17 +13,29 @@ function Warn { param($m)    Write-Host ("    [!!]  $m") -ForegroundColor Yellow
 function Fail { param($m)    Write-Host ("    [ERR] $m") -ForegroundColor Red; exit 1 }
 
 function Install-App {
-    param($id, $name, $cmd)
-    Info "Installing $name via winget..."
-    winget install --id $id --accept-source-agreements --accept-package-agreements --silent 2>&1 | Out-Null
-    Refresh-Path
-    # If the tool is now in PATH, the install succeeded regardless of winget exit code
-    if ($cmd -and (Get-Command $cmd -ErrorAction SilentlyContinue)) { return }
-    # -1978335189 = APPINSTALLER_ERROR_ALREADY_INSTALLED — treat as success
-    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
-        Fail "Failed to install $name (exit $LASTEXITCODE). Install it manually and re-run."
+    param($id, $name, $cmd, $url)
+    # Try winget first
+    $wingetOk = $false
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Info "Trying to install $name via winget..."
+        winget install --id $id --accept-source-agreements --accept-package-agreements --silent 2>&1 | Out-Null
+        Refresh-Path
+        if (Get-Command $cmd -ErrorAction SilentlyContinue) { $wingetOk = $true }
     }
-    OK "$name installed"
+    # If winget failed or unavailable, prompt for manual install
+    if (-not $wingetOk) {
+        if (Get-Command $cmd -ErrorAction SilentlyContinue) { return }  # already installed
+        Write-Host ""
+        Warn "Automatic install failed. Please install $name manually:"
+        Write-Host "    Download: $url" -ForegroundColor Cyan
+        Write-Host ""
+        Read-Host "    Install it, then press Enter to continue"
+        Refresh-Path
+        if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
+            Fail "$name not found after install. Make sure it is installed and open a new PowerShell window, then re-run."
+        }
+    }
+    OK "$name ready"
 }
 
 function Refresh-Path {
@@ -58,7 +70,7 @@ OK "winget found"
 Step 2 "Git"
 $gitCmd = Get-Command git -ErrorAction SilentlyContinue
 if (-not $gitCmd) {
-    Install-App "Git.Git" "Git" "git"
+    Install-App "Git.Git" "Git" "git" "https://git-scm.com/download/win"
     Refresh-Path
     $gitCmd = Get-Command git -ErrorAction SilentlyContinue
     if (-not $gitCmd) {
@@ -82,7 +94,7 @@ if ($nodeCmd) {
     }
 }
 if ($needNode) {
-    Install-App "OpenJS.NodeJS.LTS" "Node.js LTS" "node"
+    Install-App "OpenJS.NodeJS.LTS" "Node.js LTS" "node" "https://nodejs.org/en/download"
     Refresh-Path
     OK "Node.js $((node --version).Trim())"
 }
@@ -92,7 +104,7 @@ Step 4 "Docker Desktop"
 $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
 if (-not $dockerCmd) {
     Warn "Docker Desktop not found. Installing (~500 MB download)..."
-    Install-App "Docker.DockerDesktop" "Docker Desktop" "docker"
+    Install-App "Docker.DockerDesktop" "Docker Desktop" "docker" "https://www.docker.com/products/docker-desktop/"
     Write-Host ""
     Warn "Docker Desktop installed. A system restart is required."
     Warn "After restarting: open Docker Desktop, wait for it to load, then re-run this script."
@@ -118,7 +130,7 @@ OK "$(docker --version)"
 Step 5 "mkcert"
 $mkcertCmd = Get-Command mkcert -ErrorAction SilentlyContinue
 if (-not $mkcertCmd) {
-    Install-App "FiloSottile.mkcert" "mkcert" "mkcert"
+    Install-App "FiloSottile.mkcert" "mkcert" "mkcert" "https://github.com/FiloSottile/mkcert/releases"
     Refresh-Path
     $mkcertCmd = Get-Command mkcert -ErrorAction SilentlyContinue
     if (-not $mkcertCmd) {
